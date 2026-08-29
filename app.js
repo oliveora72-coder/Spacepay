@@ -83,8 +83,19 @@ function navigate(view){
 }
 
 async function bootstrapSession(){
+  const paymentMatch=location.hash.match(/^#pay\/([a-z0-9-]+)$/i);
+  if(paymentMatch){await renderPublicCheckout(paymentMatch[1]);return}
   try{state.config=await api('public/config')}catch{}
   try{const session=await api('auth/me');state.user=session.user;state.merchant=session.merchant;showApp();await loadOverview()}catch{showAuth()}
+}
+
+async function renderPublicCheckout(slug){
+  document.body.innerHTML=`<div id="toast-region" class="toast-region" aria-live="polite"></div><main class="checkout-screen"><section class="checkout-brand"><a class="brand brand-large" href="/"><span class="brand-mark">S</span><span>SPACE<span>PAY</span></span></a><div><span class="eyebrow">CHECKOUT PROTEGIDO</span><h1>Pagamento simples.<br><em>Confirmação rápida.</em></h1><p>Seus dados são enviados de forma segura. A Space Pay não armazena dados de cartão.</p></div><small>🔒 CONEXÃO SEGURA · PIX</small></section><section class="checkout-panel"><div id="checkout-content" class="checkout-card"><div class="checkout-loading">Carregando cobrança…</div></div></section></main>`;
+  try{
+    const result=await api(`public/payment-links/${slug}`),link=result.data;
+    $('#checkout-content').innerHTML=`<header><span class="eyebrow">PAGAR PARA</span><strong>${escapeHtml(link.merchant_name)}</strong></header><div class="checkout-product"><div><h2>${escapeHtml(link.title)}</h2><p>${escapeHtml(link.description||'Pagamento via Space Pay.')}</p></div>${link.amount_cents?`<strong>${formatMoney(link.amount_cents)}</strong>`:''}</div><form id="public-checkout-form"><label>Nome completo<input name="name" required minlength="2" placeholder="Seu nome"></label><label>E-mail<input name="email" type="email" required placeholder="voce@email.com"></label>${link.amount_cents?'':`<label>Valor<input name="amount" required inputmode="decimal" placeholder="R$ 0,00"></label>`}<button class="btn primary wide" type="submit">Gerar PIX →</button></form><footer><span>◆ PIX processado com segurança</span><span>Pedido expira em 30 minutos</span></footer>`;
+    $('#public-checkout-form').addEventListener('submit',async e=>{e.preventDefault();const button=$('button',e.currentTarget);setBusy(button,true);try{const paid=await api(`public/payment-links/${slug}/checkout`,{method:'POST',headers:{'X-Idempotency-Key':idempotency()},body:formObject(e.currentTarget)}),charge=paid.data;$('#checkout-content').innerHTML=`<div class="pix-success"><span class="success-icon">◆</span><span class="eyebrow">PIX GERADO</span><h2>${formatMoney(charge.amount_cents)}</h2><p>Copie o código abaixo e pague no aplicativo do seu banco.</p>${charge.pix_qr_base64?`<img src="data:image/png;base64,${escapeHtml(charge.pix_qr_base64)}" alt="QR Code PIX">`:''}<code id="public-pix-code">${escapeHtml(charge.pix_copy_paste||'')}</code><button id="copy-public-pix" class="btn primary wide">Copiar código PIX</button><small>A confirmação será atualizada automaticamente após o pagamento.</small></div>`;$('#copy-public-pix').addEventListener('click',()=>navigator.clipboard.writeText($('#public-pix-code').textContent).then(()=>toast('Código PIX copiado.')))}catch(error){toast(error.message,'error');setBusy(button,false)}})
+  }catch(error){$('#checkout-content').innerHTML=`<div class="checkout-error"><b>!</b><h2>Link indisponível</h2><p>${escapeHtml(error.message)}</p><a class="btn secondary" href="/">Voltar</a></div>`}
 }
 
 async function loadOverview(){
