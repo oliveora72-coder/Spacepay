@@ -1,5 +1,7 @@
 # Space Pay Gateway
 
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Foliveora72-coder%2FSpacepay&project-name=spacepay&repository-name=Spacepay)
+
 Gateway brasileira de pagamentos pronta para Vercel, com painel responsivo, API REST, PIX e cartão pelo Mercado Pago, sandbox, webhooks assinados, reembolsos, saques, clientes, links de pagamento e administração.
 
 > O software não transforma uma empresa em instituição de pagamento. Para movimentar dinheiro real, use uma conta Mercado Pago aprovada, cumpra os termos do provedor e valide obrigações jurídicas, fiscais, KYC/AML e LGPD com profissionais qualificados.
