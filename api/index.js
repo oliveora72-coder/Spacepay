@@ -230,6 +230,43 @@ async function createPaymentLink(req, auth) {
   return { ...link, checkout_url: `${cfg.appUrl}/#pay/${link.slug}` };
 }
 
+async function getPublicPaymentLink(slug) {
+  const cleanSlug = String(slug || '').replace(/[^a-z0-9-]/gi, '').slice(0, 80);
+  const link = await db(`payment_links?slug=eq.${encodeURIComponent(cleanSlug)}&active=eq.true&select=id,merchant_id,slug,title,description,amount_cents,currency,expires_at,redirect_url,merchants(name,status)&limit=1`, { single: true });
+  if (!link || link.merchants?.status !== 'active' || (link.expires_at && new Date(link.expires_at) < new Date())) throw new HttpError(404, 'payment_link_not_found', 'Este link de pagamento não está disponível.');
+  return { id: link.id, slug: link.slug, title: link.title, description: link.description, amount_cents: link.amount_cents, currency: link.currency, merchant_name: link.merchants.name, redirect_url: link.redirect_url };
+}
+
+async function checkoutPublicLink(req, slug) {
+  const link = await getPublicPaymentLink(slug);
+  await rateLimit(`checkout:${link.id}:${sha256(clientIp(req))}`, 15, 900);
+  const body = await readJson(req);
+  const key = String(req.headers['x-idempotency-key'] || body.idempotency_key || randomId());
+  return idempotent(link.merchant_id || (await db(`payment_links?id=eq.${link.id}&select=merchant_id&limit=1`, { single: true })).merchant_id, `POST:/public/payment-links/${link.slug}/checkout`, key, body, async () => {
+    const rawLink = await db(`payment_links?id=eq.${link.id}&select=merchant_id&limit=1`, { single: true });
+    const merchant = await db(`merchants?id=eq.${rawLink.merchant_id}&status=eq.active&select=*&limit=1`, { single: true });
+    if (!merchant) throw new HttpError(404, 'merchant_unavailable', 'O recebedor não está disponível.');
+    const amountCents = link.amount_cents ? Number(link.amount_cents) : amountToCents(body.amount);
+    const payerEmail = cleanEmail(body.email);
+    const payerName = cleanText(body.name, 'Nome', 2, 100);
+    const risk = await evaluateRisk(merchant.id, { amountCents, email: payerEmail });
+    if (risk.blocked) throw new HttpError(403, 'risk_blocked', 'A transação foi bloqueada pelas regras de risco.');
+    const { fee, net } = calculateFee(amountCents, merchant);
+    const externalReference = `link-${link.id}-${randomToken(7)}`;
+    const charge = await db('charges', { method: 'POST', single: true, body: { merchant_id: merchant.id, payment_link_id: link.id, external_reference: externalReference, provider: cfg.provider, method: 'pix', status: 'created', amount_cents: amountCents, fee_cents: fee, net_amount_cents: net, payer_name: payerName, payer_email: payerEmail, description: link.title, risk_score: risk.score, risk_flags: risk.flags, expires_at: new Date(Date.now() + 30 * 60_000).toISOString() } });
+    try {
+      const provider = await createProviderCharge({ method: 'pix', amountCents, payerEmail, payerName, externalReference, idempotencyKey: key });
+      const updated = await db(`charges?id=eq.${charge.id}`, { method: 'PATCH', single: true, body: { provider_order_id: provider.id, provider_payment_id: provider.paymentId || null, status: provider.status, status_detail: provider.statusDetail || null, pix_copy_paste: provider.pix?.copyPaste || null, pix_qr_base64: provider.pix?.qrBase64 || null, ticket_url: provider.pix?.ticketUrl || null, provider_payload: provider.raw || {}, updated_at: new Date().toISOString() } });
+      if (provider.status === 'approved') await rpc('settle_approved_charge', { p_charge_id: charge.id });
+      await emitEvent(merchant.id, 'charge.created', 'charge', charge.id, { id: charge.id, status: provider.status, amount_cents: amountCents });
+      return { status: 201, body: { data: publicCharge(updated), redirect_url: link.redirect_url } };
+    } catch (error) {
+      await db(`charges?id=eq.${charge.id}`, { method: 'PATCH', body: { status: 'failed', status_detail: error.code || 'provider_error', updated_at: new Date().toISOString() } }).catch(() => {});
+      throw error;
+    }
+  });
+}
+
 async function createApiKey(req, auth) {
   const body = await readJson(req);
   const mode = body.mode === 'live' ? 'live' : 'test';
@@ -350,6 +387,10 @@ export default async function handler(req, res) {
 
     if (route === 'health' && method === 'GET') return send(res, 200, { status: 'ok', provider: cfg.provider, database_configured: Boolean(cfg.supabaseUrl && cfg.supabaseKey), timestamp: new Date().toISOString() });
     if (route === 'public/config' && method === 'GET') return send(res, 200, { app_name: 'Space Pay Gateway', provider: cfg.provider, mercado_pago_public_key: cfg.mpPublicKey || null, registration_open: cfg.openRegistration });
+    let publicMatch = route.match(/^public\/payment-links\/([^/]+)$/);
+    if (publicMatch && method === 'GET') return send(res, 200, { data: await getPublicPaymentLink(publicMatch[1]) });
+    publicMatch = route.match(/^public\/payment-links\/([^/]+)\/checkout$/);
+    if (publicMatch && method === 'POST') { const result = await checkoutPublicLink(req, publicMatch[1]); return send(res, result.status, result.body, result.replay ? { 'Idempotent-Replayed': 'true' } : {}); }
     if (route === 'auth/register' && method === 'POST') { const result = await handleRegister(req); return send(res, result.status, result.body, result.headers); }
     if (route === 'auth/login' && method === 'POST') { const result = await handleLogin(req); return send(res, result.status, result.body, result.headers); }
     if (route === 'auth/logout' && method === 'POST') return send(res, 200, { ok: true }, { 'Set-Cookie': clearSessionCookie() });
